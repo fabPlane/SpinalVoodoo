@@ -95,7 +95,11 @@ case class FramebufferMemSubsystem(c: Config) extends Component {
   val colorReaderDirect =
     if (!useCachedReaders) FramebufferPlaneDirectReader(c).setName("fbColorReader") else null
   val scanoutReaderCached =
-    FramebufferPlaneReader(c, suppressStartupDirectMiss = true).setName("fbScanoutReader")
+    FramebufferPlaneReader(
+      c,
+      suppressStartupDirectMiss = true,
+      laneStride = c.hdmiScanoutPixelRepeatX
+    ).setName("fbScanoutReader")
   val auxReaderDirect =
     if (!useCachedReaders) FramebufferPlaneDirectReader(c).setName("fbAuxReader") else null
   val colorWritePort = FramebufferPlaneBuffer(c).setName("fbColorBuffer")

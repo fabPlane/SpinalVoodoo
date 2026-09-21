@@ -364,6 +364,10 @@ case class HdmiCdcFramebufferScanout(
   ))
 
   private val repeatShift = log2Up(pixelRepeatX)
+  // Keep each cached scanout fill within a 256-byte window.  The downstream
+  // BMB/AXI bridge accepts longer lines, but a line that crosses a 4 KiB
+  // boundary can wrap response data on the Console DDR path.
+  private val prefetchChunkPixels = 128 / pixelRepeatX
   val displayWidth = io.regs.displayWidth.resize(hWidth)
   val sourceWidth = (displayWidth >> repeatShift).resize(hWidth)
   val displayHeight = io.regs.displayHeight.resize(vWidth)
@@ -372,16 +376,25 @@ case class HdmiCdcFramebufferScanout(
   val canPrefetch =
     displayEnabled && refillActive && (projected < U(fifoDepth - 4, projected.getWidth bits))
   val atEndOfDisplayLine = prefetchX === (sourceWidth - 1).resized
+  val prefetchChunkCandidate = UInt(hWidth bits)
+  prefetchChunkCandidate := prefetchX | U(prefetchChunkPixels - 1, hWidth bits)
+  val prefetchChunkEndX = UInt(hWidth bits)
+  prefetchChunkEndX := Mux(
+    prefetchChunkCandidate < sourceWidth,
+    prefetchChunkCandidate,
+    (sourceWidth - 1).resized
+  )
+  val atEndOfPrefetchChunk = prefetchX === prefetchChunkEndX
   val atEndOfDisplayFrame = atEndOfDisplayLine && prefetchY === (displayHeight - 1).resized
   val lineStartAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
-    U(0, 10 bits),
+    (prefetchX << repeatShift).resize(10 bits),
     prefetchY.resize(10 bits),
     io.regs.pixelStride
   )
   val lineEndAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
-    ((sourceWidth - 1) << repeatShift).resize(10 bits),
+    (prefetchChunkEndX << repeatShift).resize(10 bits),
     prefetchY.resize(10 bits),
     io.regs.pixelStride
   )
@@ -440,6 +453,9 @@ case class HdmiCdcFramebufferScanout(
         prefetchY := prefetchY + 1
         linePrefetched := False
       }
+    } elsewhen (atEndOfPrefetchChunk) {
+      prefetchX := prefetchX + 1
+      linePrefetched := False
     } otherwise {
       prefetchX := prefetchX + 1
     }

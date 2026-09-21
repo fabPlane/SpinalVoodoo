@@ -6,8 +6,14 @@ import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.bmb._
 
-case class FramebufferPlaneReader(c: Config, suppressStartupDirectMiss: Boolean = false) extends Component {
+case class FramebufferPlaneReader(
+    c: Config,
+    suppressStartupDirectMiss: Boolean = false,
+    laneStride: Int = 1
+) extends Component {
   import FramebufferPlaneBuffer._
+
+  require(isPow2(laneStride), "framebuffer reader lane stride must be a power of two")
 
   val addrWidth = c.addressWidth.value
   val maxSpanPixels = c.maxFbDims._1
@@ -125,7 +131,8 @@ case class FramebufferPlaneReader(c: Config, suppressStartupDirectMiss: Boolean 
       .resize(
         spanLaneCountWidth bits
       ) + 1).resized
-    span.laneCount := (((endExact - startExact) >> 1).resize(spanLaneCountWidth bits) + 1).resized
+    span.laneCount := (((endExact - startExact) >> (1 + log2Up(laneStride)))
+      .resize(spanLaneCountWidth bits) + 1).resized
     span
   }
 
@@ -199,7 +206,7 @@ case class FramebufferPlaneReader(c: Config, suppressStartupDirectMiss: Boolean 
       consumeRemainingLanes := 0
     }.otherwise {
       consumeActive := True
-      consumeExpectedAddr := (consumeCurrentAddr + U(2, addrWidth bits)).resized
+      consumeExpectedAddr := (consumeCurrentAddr + U(2 * laneStride, addrWidth bits)).resized
       consumeRemainingLanes := consumeCurrentRemaining - 1
     }
     consumeQueue.io.pop.ready := onFirstLane
@@ -266,33 +273,53 @@ case class FramebufferPlaneReader(c: Config, suppressStartupDirectMiss: Boolean 
 
   val currentFillWordAddress =
     (activeFillSpan.firstWordAddress + (activeFillWordIndex.resize(addrWidth bits) << 2)).resized
-  val emitLo =
+  val loInSpan =
     currentFillWordAddress =/= activeFillSpan.firstWordAddress || !activeFillSpan.startAddress(1)
-  val emitHi =
+  val hiInSpan =
     currentFillWordAddress =/= activeFillSpan.lastWordAddress || activeFillSpan.endAddress(1)
+  val emitLo = Bool()
+  val emitHi = Bool()
+  if (laneStride == 1) {
+    emitLo := loInSpan
+    emitHi := hiInSpan
+  } else {
+    val strideShift = log2Up(laneStride)
+    val loLaneOffset = UInt(addrWidth bits)
+    val hiLaneOffset = UInt(addrWidth bits)
+    loLaneOffset := ((currentFillWordAddress - activeFillSpan.startAddress) >> 1).resized
+    hiLaneOffset := (loLaneOffset + 1).resized
+    emitLo := loInSpan && loLaneOffset(strideShift - 1 downto 0) === 0
+    emitHi := hiInSpan && hiLaneOffset(strideShift - 1 downto 0) === 0
+  }
   val readDataLo = internalMem.rsp.fragment.data(15 downto 0)
   val readDataHi = internalMem.rsp.fragment.data(31 downto 16)
   val responseKindValid = responseKindQueue.io.pop.valid
   val responseIsDirect = responseKindQueue.io.pop.payload
   val prefetchMemRspValid = internalMem.rsp.valid && responseKindValid && !responseIsDirect
   val directMissMemRspValid = internalMem.rsp.valid && responseKindValid && responseIsDirect
-  val canAcceptMemRsp = activeFillValid && !pendingLaneValid && laneFifo.io.push.ready
+  val emitsSelectedLane = emitLo || emitHi
+  val canAcceptMemRsp =
+    activeFillValid && !pendingLaneValid && (!emitsSelectedLane || laneFifo.io.push.ready)
 
   internalMem.rsp.ready := (canAcceptMemRsp && responseKindValid && !responseIsDirect) || (directMissMemRspValid && directMissLaneQueue.io.pop.valid && readRspFifo.io.push.ready)
-  laneFifo.io.push.valid := pendingLaneValid || (prefetchMemRspValid && activeFillValid && emitLo)
-  laneFifo.io.push.payload := pendingLaneValid ? pendingLaneData | readDataLo
+  laneFifo.io.push.valid := pendingLaneValid ||
+    (prefetchMemRspValid && activeFillValid && emitsSelectedLane)
+  laneFifo.io.push.payload := pendingLaneValid ? pendingLaneData |
+    (emitHi ? readDataHi | readDataLo)
 
   when(pendingLaneValid && laneFifo.io.push.ready) {
     pendingLaneValid := False
   }
 
   when(internalMem.rsp.fire && responseKindValid && !responseIsDirect) {
-    when(!emitLo && emitHi) {
-      laneFifo.io.push.valid := True
-      laneFifo.io.push.payload := readDataHi
-    }.elsewhen(emitLo && emitHi) {
-      pendingLaneValid := True
-      pendingLaneData := readDataHi
+    if (laneStride == 1) {
+      when(!emitLo && emitHi) {
+        laneFifo.io.push.valid := True
+        laneFifo.io.push.payload := readDataHi
+      }.elsewhen(emitLo && emitHi) {
+        pendingLaneValid := True
+        pendingLaneData := readDataHi
+      }
     }
 
     // `rsp.last` may mark the end of a splitter fragment rather than the end
