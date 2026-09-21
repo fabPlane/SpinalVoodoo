@@ -32,6 +32,9 @@ case class Config(
     texFillXorIndex: Boolean = false,
     texFillRequestWindow: Int = 16,
     packedTexLayout: Boolean = true,
+    enableHdmiScanout: Boolean = true,
+    hdmiScanoutPixelRepeatX: Int = 1,
+    hdmiScanoutDmt640x480: Boolean = false,
     trace: TraceConfig = TraceConfig()
 )
 

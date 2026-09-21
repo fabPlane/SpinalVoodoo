@@ -315,9 +315,11 @@ case class HdmiCdcFramebufferScanout(
     fifoDepth: Int = 4096,
     prefillLevel: Int = 2048,
     refillLowLevel: Int = 1024,
-    refillHighLevel: Int = 3072
+    refillHighLevel: Int = 3072,
+    pixelRepeatX: Int = 1
 ) extends Component {
   require(isPow2(fifoDepth), "HDMI CDC FIFO depth must be a power of two")
+  require(isPow2(pixelRepeatX), "horizontal pixel repeat must be a power of two")
   require(prefillLevel > 0 && prefillLevel < fifoDepth)
   require(refillLowLevel > 0 && refillLowLevel < refillHighLevel)
   require(refillHighLevel < fifoDepth)
@@ -361,13 +363,15 @@ case class HdmiCdcFramebufferScanout(
     projected.getWidth
   ))
 
+  private val repeatShift = log2Up(pixelRepeatX)
   val displayWidth = io.regs.displayWidth.resize(hWidth)
+  val sourceWidth = (displayWidth >> repeatShift).resize(hWidth)
   val displayHeight = io.regs.displayHeight.resize(vWidth)
   val displayEnabled =
     io.regs.framebufferEnable && io.regs.displayWidth =/= 0 && io.regs.displayHeight =/= 0
   val canPrefetch =
     displayEnabled && refillActive && (projected < U(fifoDepth - 4, projected.getWidth bits))
-  val atEndOfDisplayLine = prefetchX === (displayWidth - 1).resized
+  val atEndOfDisplayLine = prefetchX === (sourceWidth - 1).resized
   val atEndOfDisplayFrame = atEndOfDisplayLine && prefetchY === (displayHeight - 1).resized
   val lineStartAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
@@ -377,7 +381,7 @@ case class HdmiCdcFramebufferScanout(
   )
   val lineEndAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
-    (displayWidth - 1).resize(10 bits),
+    ((sourceWidth - 1) << repeatShift).resize(10 bits),
     prefetchY.resize(10 bits),
     io.regs.pixelStride
   )
@@ -416,7 +420,7 @@ case class HdmiCdcFramebufferScanout(
   io.readReq.valid := canPrefetch && linePrefetched
   io.readReq.address := FramebufferAddressMath.planeAddress(
     prefetchBase,
-    prefetchX.resize(10 bits),
+    (prefetchX << repeatShift).resize(10 bits),
     prefetchY.resize(10 bits),
     io.regs.pixelStride
   )
@@ -477,7 +481,13 @@ case class HdmiCdcFramebufferScanout(
       frameAligned := True
     }
 
-    pixelFifo.io.pop.ready := useFramebuffer && frameAligned && contentActive
+    // Consume one source pixel at the end of each repeated group. The FIFO
+    // head stays stable for all pixels in the group while HDMI remains at its
+    // standard timing.
+    val repeatGroupLast = if (pixelRepeatX == 1) True else
+      scan.io.x(repeatShift - 1 downto 0) === U(pixelRepeatX - 1, repeatShift bits)
+    pixelFifo.io.pop.ready :=
+      useFramebuffer && frameAligned && contentActive && repeatGroupLast
     when(useFramebuffer && frameAligned && contentActive && !pixelFifo.io.pop.valid) {
       underflowReg := True
     }

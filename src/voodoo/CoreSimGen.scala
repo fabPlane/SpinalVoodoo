@@ -37,7 +37,8 @@ object CoreSimGen extends App {
         argIntValue("--tex-fill-way-count").getOrElse(Config.voodoo1().texFillWayCount),
       texFillXorIndex = args.contains("--tex-fill-xor-index"),
       texFillRequestWindow =
-        argIntValue("--tex-fill-request-window").getOrElse(Config.voodoo1().texFillRequestWindow)
+        argIntValue("--tex-fill-request-window").getOrElse(Config.voodoo1().texFillRequestWindow),
+      enableHdmiScanout = false
     )
 
   val memTiming = SimMemoryTiming(

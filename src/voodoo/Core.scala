@@ -10,7 +10,7 @@ import voodoo.core.{
   PixelPipeline,
   TextureMemSubsystem
 }
-import voodoo.hdmi.{HdmiCdcFramebufferScanout, HdmiScanoutPort}
+import voodoo.hdmi.{HdmiCdcFramebufferScanout, HdmiScanoutPort, VideoTiming}
 import voodoo.texture.TextureMem
 
 object Core {
@@ -95,6 +95,26 @@ case class Core(c: Config) extends Component {
     // Integrated scanout path. Board wrappers provide the physical HDMI transmitter/clocking.
     val hdmi = master(HdmiScanoutPort(c))
 
+    // Board-level bring-up counters for the framebuffer scanout prefill path.
+    val scanoutPrefetchCount = out UInt (16 bits)
+    val scanoutReadReqCount = out UInt (16 bits)
+    val scanoutReadRspCount = out UInt (16 bits)
+    val scanoutCacheDebug = out Bits (64 bits)
+    val scanoutCacheReadAddr = out UInt (c.addressWidth)
+    val scanoutCacheExpectedAddr = out UInt (c.addressWidth)
+    val scanoutCacheRemaining = out UInt (log2Up(c.maxFbDims._1 + 1) bits)
+    val scanoutCacheOccupancy = out Bits (32 bits)
+    val scanoutFillHits = out UInt (32 bits)
+    val scanoutFillMisses = out UInt (32 bits)
+    val scanoutFillBurstCount = out UInt (32 bits)
+    val scanoutFillBurstBeats = out UInt (32 bits)
+    val scanoutFillStallCycles = out UInt (32 bits)
+
+    // One bit per ordered-pipeline busy source. Board diagnostics use this to
+    // identify the stage preventing a queued synchronization command from
+    // draining without needing an embedded logic analyzer.
+    val pipelineBusySources = out Bits (32 bits)
+
   }
   val addressRemapper =
     AddressRemapper(RegisterBank.externalBmbParams(c), RegisterBank.bmbParams(c))
@@ -110,7 +130,13 @@ case class Core(c: Config) extends Component {
   val pixelPipeline = PixelPipeline(c)
   val framebufferMem = FramebufferMemSubsystem(c)
   val textureMem = TextureMemSubsystem(c)
-  val hdmiScanout = HdmiCdcFramebufferScanout(c)
+  val hdmiScanout = HdmiCdcFramebufferScanout(
+    c,
+    timing = if (c.hdmiScanoutDmt640x480) VideoTiming.dmt640x480 else VideoTiming.cea720x480p,
+    pixelRepeatX = c.hdmiScanoutPixelRepeatX
+  )
+
+  io.pipelineBusySources := pixelPipeline.io.debug.pipelineBusySources
 
   val controlPlane = new Area {
     val swapBuffer = SwapBuffer()
@@ -147,7 +173,7 @@ case class Core(c: Config) extends Component {
     hdmiScanout.io.regs.pixelStride := framebufferLayout.draw.pixelStride
     hdmiScanout.io.regs.displayWidth := 640
     hdmiScanout.io.regs.displayHeight := 480
-    hdmiScanout.io.regs.framebufferEnable := True
+    hdmiScanout.io.regs.framebufferEnable := Bool(c.enableHdmiScanout)
     hdmiScanout.io.regs.testPatternEnable := False
     hdmiScanout.io.regs.gammaLut := regBank.io.gammaLut
 
@@ -176,6 +202,32 @@ case class Core(c: Config) extends Component {
   framebufferMem.io.scanoutPrefetchReq << hdmiScanout.io.prefetchReq
   framebufferMem.io.scanoutReadReq << hdmiScanout.io.readReq
   hdmiScanout.io.readRsp << framebufferMem.io.scanoutReadRsp
+
+  val scanoutPrefetchCount = Reg(UInt(16 bits)) init (0)
+  val scanoutReadReqCount = Reg(UInt(16 bits)) init (0)
+  val scanoutReadRspCount = Reg(UInt(16 bits)) init (0)
+  when(hdmiScanout.io.prefetchReq.fire) {
+    scanoutPrefetchCount := scanoutPrefetchCount + 1
+  }
+  when(hdmiScanout.io.readReq.fire) {
+    scanoutReadReqCount := scanoutReadReqCount + 1
+  }
+  when(hdmiScanout.io.readRsp.fire) {
+    scanoutReadRspCount := scanoutReadRspCount + 1
+  }
+  io.scanoutPrefetchCount := scanoutPrefetchCount
+  io.scanoutReadReqCount := scanoutReadReqCount
+  io.scanoutReadRspCount := scanoutReadRspCount
+  io.scanoutCacheDebug := framebufferMem.io.scanoutCacheDebug
+  io.scanoutCacheReadAddr := framebufferMem.io.scanoutCacheReadAddr
+  io.scanoutCacheExpectedAddr := framebufferMem.io.scanoutCacheExpectedAddr
+  io.scanoutCacheRemaining := framebufferMem.io.scanoutCacheRemaining
+  io.scanoutCacheOccupancy := framebufferMem.io.scanoutCacheOccupancy
+  io.scanoutFillHits := framebufferMem.io.scanoutFillHits
+  io.scanoutFillMisses := framebufferMem.io.scanoutFillMisses
+  io.scanoutFillBurstCount := framebufferMem.io.scanoutFillBurstCount
+  io.scanoutFillBurstBeats := framebufferMem.io.scanoutFillBurstBeats
+  io.scanoutFillStallCycles := framebufferMem.io.scanoutFillStallCycles
   framebufferMem.io.auxReadReq << pixelPipeline.io.auxReadReq
   pixelPipeline.io.auxReadRsp << framebufferMem.io.auxReadRsp
   framebufferMem.io.prefetchColor <> pixelPipeline.io.prefetchColor

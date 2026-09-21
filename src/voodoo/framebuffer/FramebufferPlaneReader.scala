@@ -6,7 +6,7 @@ import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.bmb._
 
-case class FramebufferPlaneReader(c: Config) extends Component {
+case class FramebufferPlaneReader(c: Config, allowDirectMiss: Boolean = true) extends Component {
   import FramebufferPlaneBuffer._
 
   val addrWidth = c.addressWidth.value
@@ -214,8 +214,16 @@ case class FramebufferPlaneReader(c: Config) extends Component {
 
   // If the consumer is behind the prefetch stream (or no prefetched span is
   // available), fall back to an ordered direct read.
-  val directMissNeeded = !consumeExpectedValid ||
-    (consumeExpectedValid && !consumeAddrMatches && !consumeAddrAhead)
+  // A scanout request is always preceded by its line prefetch.  Let that
+  // consumer wait for the queued span instead of issuing an early direct miss:
+  // a direct miss accepted in the one-cycle prefetch/consume startup window
+  // can hold the ordered response path ahead of the now-ready cached lane.
+  val directMissNeeded = if (allowDirectMiss) {
+    !consumeExpectedValid ||
+      (consumeExpectedValid && !consumeAddrMatches && !consumeAddrAhead)
+  } else {
+    False
+  }
   val directMissCmdValid = io.readReq.valid && directMissNeeded && directMissLaneQueue.io.push.ready
   val prefetchCmdValid = spanIssueQueue.io.pop.valid && issuedSpanQueue.io.push.ready
   val directMissCmdSelected = directMissCmdValid
