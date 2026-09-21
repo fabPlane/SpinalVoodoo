@@ -6,7 +6,7 @@ import spinal.core.sim._
 import spinal.lib._
 import spinal.lib.bus.bmb._
 
-case class FramebufferPlaneReader(c: Config) extends Component {
+case class FramebufferPlaneReader(c: Config, suppressStartupDirectMiss: Boolean = false) extends Component {
   import FramebufferPlaneBuffer._
 
   val addrWidth = c.addressWidth.value
@@ -69,6 +69,11 @@ case class FramebufferPlaneReader(c: Config) extends Component {
   val issueQueueDepth = 64
   val spanIssueQueue = StreamFifo(HardType(SpanCmd()), issueQueueDepth)
   val issuedSpanQueue = StreamFifo(HardType(SpanCmd()), 4)
+  // The Console SDRAM path serializes transactions but does not preserve the
+  // BMB source bit through its AXI/native bridge.  Remember command kind in
+  // issue order so responses can still be routed to cached fills vs direct
+  // recovery reads without trusting rsp.source.
+  val responseKindQueue = StreamFifo(Bool(), issueQueueDepth)
   val laneFifo = StreamFifo(Bits(16 bits), lineBufferLanes)
   val directMissLaneQueue = StreamFifo(Bool(), 8)
   val readRspFifo = StreamFifo(ReadRsp(), 16)
@@ -214,14 +219,20 @@ case class FramebufferPlaneReader(c: Config) extends Component {
 
   // If the consumer is behind the prefetch stream (or no prefetched span is
   // available), fall back to an ordered direct read.
-  val directMissNeeded = !consumeExpectedValid ||
+  // A scanout request is always preceded by its line prefetch.  Let that
+  // consumer wait for the queued span instead of issuing an early direct miss:
+  // a direct miss accepted in the one-cycle prefetch/consume startup window
+  // can hold the ordered response path ahead of the now-ready cached lane.
+  val startupDirectMissNeeded =
+    if (suppressStartupDirectMiss) False else !consumeExpectedValid
+  val directMissNeeded = startupDirectMissNeeded ||
     (consumeExpectedValid && !consumeAddrMatches && !consumeAddrAhead)
   val directMissCmdValid = io.readReq.valid && directMissNeeded && directMissLaneQueue.io.push.ready
   val prefetchCmdValid = spanIssueQueue.io.pop.valid && issuedSpanQueue.io.push.ready
   val directMissCmdSelected = directMissCmdValid
   val prefetchCmdSelected = prefetchCmdValid && !directMissCmdSelected
 
-  internalMem.cmd.valid := directMissCmdSelected || prefetchCmdSelected
+  internalMem.cmd.valid := (directMissCmdSelected || prefetchCmdSelected) && responseKindQueue.io.push.ready
   internalMem.cmd.fragment.address := directMissCmdSelected ? alignedWordAddress(
     io.readReq.address
   ) | spanIssueQueue.io.pop.payload.firstWordAddress
@@ -234,11 +245,14 @@ case class FramebufferPlaneReader(c: Config) extends Component {
   internalMem.cmd.fragment.data := 0
   internalMem.cmd.fragment.mask := 0
   internalMem.cmd.last := True
-  spanIssueQueue.io.pop.ready := internalMem.cmd.ready && issuedSpanQueue.io.push.ready && !directMissCmdSelected
+  spanIssueQueue.io.pop.ready := internalMem.cmd.fire && prefetchCmdSelected
   issuedSpanQueue.io.push.valid := internalMem.cmd.fire && prefetchCmdSelected
   issuedSpanQueue.io.push.payload := spanIssueQueue.io.pop.payload
   directMissLaneQueue.io.push.valid := internalMem.cmd.fire && directMissCmdSelected
   directMissLaneQueue.io.push.payload := io.readReq.address(1)
+  responseKindQueue.io.push.valid := internalMem.cmd.fire
+  responseKindQueue.io.push.payload := directMissCmdSelected
+  responseKindQueue.io.pop.ready := False
   issuedSpanQueue.io.pop.ready := False
   when(internalMem.cmd.fire && prefetchCmdSelected) {
     fillBurstCount := fillBurstCount + 1
@@ -258,11 +272,13 @@ case class FramebufferPlaneReader(c: Config) extends Component {
     currentFillWordAddress =/= activeFillSpan.lastWordAddress || activeFillSpan.endAddress(1)
   val readDataLo = internalMem.rsp.fragment.data(15 downto 0)
   val readDataHi = internalMem.rsp.fragment.data(31 downto 16)
-  val prefetchMemRspValid = internalMem.rsp.valid && internalMem.rsp.source === 0
-  val directMissMemRspValid = internalMem.rsp.valid && internalMem.rsp.source === 1
+  val responseKindValid = responseKindQueue.io.pop.valid
+  val responseIsDirect = responseKindQueue.io.pop.payload
+  val prefetchMemRspValid = internalMem.rsp.valid && responseKindValid && !responseIsDirect
+  val directMissMemRspValid = internalMem.rsp.valid && responseKindValid && responseIsDirect
   val canAcceptMemRsp = activeFillValid && !pendingLaneValid && laneFifo.io.push.ready
 
-  internalMem.rsp.ready := (canAcceptMemRsp && internalMem.rsp.source === 0) || (directMissMemRspValid && directMissLaneQueue.io.pop.valid && readRspFifo.io.push.ready)
+  internalMem.rsp.ready := (canAcceptMemRsp && responseKindValid && !responseIsDirect) || (directMissMemRspValid && directMissLaneQueue.io.pop.valid && readRspFifo.io.push.ready)
   laneFifo.io.push.valid := pendingLaneValid || (prefetchMemRspValid && activeFillValid && emitLo)
   laneFifo.io.push.payload := pendingLaneValid ? pendingLaneData | readDataLo
 
@@ -270,7 +286,7 @@ case class FramebufferPlaneReader(c: Config) extends Component {
     pendingLaneValid := False
   }
 
-  when(internalMem.rsp.fire && internalMem.rsp.source === 0) {
+  when(internalMem.rsp.fire && responseKindValid && !responseIsDirect) {
     when(!emitLo && emitHi) {
       laneFifo.io.push.valid := True
       laneFifo.io.push.payload := readDataHi
@@ -283,6 +299,7 @@ case class FramebufferPlaneReader(c: Config) extends Component {
     // of the original fill span. Retire only after all requested words return.
     when(activeFillWordIndex === activeFillSpan.wordCount - 1) {
       issuedSpanQueue.io.pop.ready := True
+      responseKindQueue.io.pop.ready := True
       activeFillWordIndex := 0
     }.otherwise {
       activeFillWordIndex := activeFillWordIndex + 1
@@ -297,7 +314,7 @@ case class FramebufferPlaneReader(c: Config) extends Component {
     laneFifo.io.pop.valid && consumeExpectedValid && consumeAddrMatches && !directMissOutstanding
   val skipCachedLane =
     io.readReq.valid && consumeExpectedValid && !consumeAddrMatches && consumeAddrAhead && laneFifo.io.pop.valid
-  val directMissReadReady = directMissCmdSelected && internalMem.cmd.ready
+  val directMissReadReady = directMissCmdSelected && internalMem.cmd.ready && responseKindQueue.io.push.ready
   val cachedReadFire = io.readReq.valid && readRspFifo.io.push.ready && readCanServe
   val directMissRspFire =
     directMissMemRspValid && directMissLaneQueue.io.pop.valid && readRspFifo.io.push.ready
@@ -306,6 +323,9 @@ case class FramebufferPlaneReader(c: Config) extends Component {
   readRspFifo.io.push.payload.data := directMissRspFire ? (directMissLaneQueue.io.pop.payload ? readDataHi | readDataLo) | laneFifo.io.pop.payload
   laneFifo.io.pop.ready := cachedReadFire || skipCachedLane
   directMissLaneQueue.io.pop.ready := directMissRspFire
+  when(directMissRspFire) {
+    responseKindQueue.io.pop.ready := True
+  }
 
   when(cachedReadFire || skipCachedLane) {
     advanceConsume(!consumeActive)

@@ -31,6 +31,20 @@ case class FramebufferMemSubsystem(c: Config) extends Component {
 
     val status = out(FramebufferMemStatus())
     val stats = out(FramebufferMemStats())
+
+    // Hardware bring-up visibility for the always-cached HDMI reader.  These
+    // are exported to the Tang Console JTAG diagnostic mailbox so its state
+    // can be inspected without relying on the on-screen HUD.
+    val scanoutCacheDebug = out Bits (64 bits)
+    val scanoutCacheReadAddr = out UInt (c.addressWidth)
+    val scanoutCacheExpectedAddr = out UInt (c.addressWidth)
+    val scanoutCacheRemaining = out UInt (log2Up(c.maxFbDims._1 + 1) bits)
+    val scanoutCacheOccupancy = out Bits (32 bits)
+    val scanoutFillHits = out UInt (32 bits)
+    val scanoutFillMisses = out UInt (32 bits)
+    val scanoutFillBurstCount = out UInt (32 bits)
+    val scanoutFillBurstBeats = out UInt (32 bits)
+    val scanoutFillStallCycles = out UInt (32 bits)
   }
 
   private def makeFbWriteArbiter() =
@@ -80,7 +94,8 @@ case class FramebufferMemSubsystem(c: Config) extends Component {
     if (useCachedReaders) FramebufferPlaneReader(c).setName("fbAuxReader") else null
   val colorReaderDirect =
     if (!useCachedReaders) FramebufferPlaneDirectReader(c).setName("fbColorReader") else null
-  val scanoutReaderCached = FramebufferPlaneReader(c).setName("fbScanoutReader")
+  val scanoutReaderCached =
+    FramebufferPlaneReader(c, suppressStartupDirectMiss = true).setName("fbScanoutReader")
   val auxReaderDirect =
     if (!useCachedReaders) FramebufferPlaneDirectReader(c).setName("fbAuxReader") else null
   val colorWritePort = FramebufferPlaneBuffer(c).setName("fbColorBuffer")
@@ -113,6 +128,16 @@ case class FramebufferMemSubsystem(c: Config) extends Component {
   io.scanoutPrefetchReq >> scanoutReaderCached.io.prefetchReq
   io.scanoutReadReq.s2mPipe() >> scanoutReaderCached.io.readReq
   io.scanoutReadRsp << scanoutReaderCached.io.readRsp
+  io.scanoutCacheDebug := scanoutReaderCached.io.cacheDebug
+  io.scanoutCacheReadAddr := scanoutReaderCached.io.cacheDebugReadAddr
+  io.scanoutCacheExpectedAddr := scanoutReaderCached.io.cacheDebugExpectedAddr
+  io.scanoutCacheRemaining := scanoutReaderCached.io.cacheDebugRemaining
+  io.scanoutCacheOccupancy := scanoutReaderCached.io.cacheDebugOccupancy
+  io.scanoutFillHits := scanoutReaderCached.io.fillHits
+  io.scanoutFillMisses := scanoutReaderCached.io.fillMisses
+  io.scanoutFillBurstCount := scanoutReaderCached.io.fillBurstCount
+  io.scanoutFillBurstBeats := scanoutReaderCached.io.fillBurstBeats
+  io.scanoutFillStallCycles := scanoutReaderCached.io.fillStallCycles
 
   disableReadPort(colorWritePort)
   disableReadPort(auxWritePort)

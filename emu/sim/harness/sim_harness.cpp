@@ -49,6 +49,9 @@ static VerilatedFstC *tfp = nullptr;
 static uint64_t sim_time = 0;
 static uint64_t cycle_limit = 0;  /* 0 = no limit; set via SIM_CYCLE_LIMIT */
 
+/* Darwin still requires a definition; Linux can leave Verilator's weak symbol unresolved. */
+double sc_time_stamp() { return static_cast<double>(sim_time); }
+
 /* Vsync generation: toggle vRetrace every VSYNC_HALF_PERIOD ticks */
 #define VSYNC_PERIOD     5000
 #define VSYNC_HIGH_TICKS 200

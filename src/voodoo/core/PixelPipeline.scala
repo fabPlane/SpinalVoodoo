@@ -707,6 +707,7 @@ case class PixelPipeline(c: Config) extends Component {
   pipelineBusySources(30) := lfb.io.busy
 
   io.debug.pipelineBusy := pipelineBusySignal
+  io.debug.pipelineBusySources := pipelineBusySources
   lfb.io.pipelineBusy := lfbReadSafeBusySignal
 
   io.stats.exposeToSim()
