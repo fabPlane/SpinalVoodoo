@@ -11,7 +11,10 @@ import spinal.lib.bus.bmb._
   *   - Unified 24-bit CPU bus matching PCI BAR layout (address decode inside Core)
   *   - Status outputs for fast idle polling
   */
-case class CoreSim(c: Config, memTiming: SimMemoryTiming = SimMemoryTiming()) extends Component {
+case class CoreSim(
+    c: Config = Config.voodoo1().copy(enableHdmiScanout = false),
+    memTiming: SimMemoryTiming = SimMemoryTiming()
+) extends Component {
   val io = new Bundle {
     // Unified CPU bus (24-bit address covers 16MB PCI BAR)
     val cpuBus = slave(Bmb(Core.cpuBmbParams))
@@ -51,6 +54,11 @@ case class CoreSim(c: Config, memTiming: SimMemoryTiming = SimMemoryTiming()) ex
 
   core.io.fbBaseAddr := 0
   core.io.flushFbCaches := io.flushFbCaches
+
+  // Trace replay does not need scanout. Hold the HDMI domain in reset; CoreSim
+  // also clears framebufferEnable so prefetch cannot fill the CDC FIFO.
+  core.io.hdmi.clock := False
+  core.io.hdmi.reset := True
 }
 
 object CoreSim {

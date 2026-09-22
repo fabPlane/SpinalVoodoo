@@ -49,6 +49,9 @@ static VerilatedFstC *tfp = nullptr;
 static uint64_t sim_time = 0;
 static uint64_t cycle_limit = 0;  /* 0 = no limit; set via SIM_CYCLE_LIMIT */
 
+/* Darwin still requires a definition; Linux can leave Verilator's weak symbol unresolved. */
+double sc_time_stamp() { return static_cast<double>(sim_time); }
+
 /* Vsync generation: toggle vRetrace every VSYNC_HALF_PERIOD ticks */
 #define VSYNC_PERIOD     5000
 #define VSYNC_HIGH_TICKS 200
@@ -906,11 +909,17 @@ uint32_t sim_idle_wait(void) {
             idle_count = 0;
         }
 
-        timeout--;
+        /* A tight MMIO polling loop monopolizes CoreSim's BMB port and can
+         * starve framebuffer traffic, preventing the busy condition we are
+         * waiting on from ever clearing. Let the core make forward progress
+         * between status samples. */
+        for (int i = 0; i < 64; ++i)
+            tick_one();
+        timeout -= 64;
     }
 
     uint32_t status = bus_read(0x000000);
-    fprintf(stderr, "[sim_harness] WARNING: idle_wait timeout after 1M ticks (%lu elapsed)! status=0x%08x fifo=%u busy=%u swaps=%u\n",
+    fprintf(stderr, "[sim_harness] WARNING: idle_wait timeout (%lu elapsed cycles)! status=0x%08x fifo=%u busy=%u swaps=%u\n",
             (unsigned long)((sim_time - t0) / 2), status,
             status & SST_FIFOFREE_MASK,
             (status & SST_BUSY) ? 1u : 0u,

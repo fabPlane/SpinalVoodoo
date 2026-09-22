@@ -88,7 +88,7 @@ state-roundtrip: $(OBJ_DIR)/state_roundtrip_test
 $(VERILOG): $(SCALA_SRCS) $(CORE_SIM_GEN_ARGS_FILE) $(SIM_INTERFACE_FILE)
 	@rm -f $(dir $(VERILOG))*.bin
 	cd $(PROJ_ROOT) && java -Xmx2g -cp "$$( $(SCALA_CLI) compile project.scala src --print-class-path $(SCALA_CLI_FLAGS) )" $(SIM_GEN_CLASS) $(if $(filter 1,$(TRACE)),--trace-pipeline) $(CORE_SIM_GEN_ARGS)
-	@sed -i 's|\$$readmemb("\([^/"]*\.bin\)"|\$$readmemb("$(abspath $(dir $(VERILOG)))/\1"|g' $@
+	@sed -i.bak 's|\$$readmemb("\([^/"]*\.bin\)"|\$$readmemb("$(abspath $(dir $(VERILOG)))/\1"|g' $@ && rm -f $@.bak
 
 # Step 2: Verilate (64-bit obj_dir, separate from 32-bit Glide build)
 $(VERILATE_STAMP): $(VERILOG) $(TRACE_MODE_FILE) $(SIM_INTERFACE_FILE)

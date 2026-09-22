@@ -590,7 +590,7 @@ int main(int argc, char **argv) {
                         }
 #endif
 
-                        if (reg == 0x128)
+                        if (reg == 0x128 && !sim_skip_final_idle)
                             sim_idle_wait();
 
                         /* Swapbuffer is the only replay synchronization point.
