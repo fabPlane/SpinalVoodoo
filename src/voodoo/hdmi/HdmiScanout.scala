@@ -316,10 +316,14 @@ case class HdmiCdcFramebufferScanout(
     prefillLevel: Int = 2048,
     refillLowLevel: Int = 1024,
     refillHighLevel: Int = 3072,
-    pixelRepeatX: Int = 1
+    pixelRepeatX: Int = 1,
+    pixelRepeatY: Int = 1,
+    originX: Int = 0,
+    originY: Int = 0
 ) extends Component {
   require(isPow2(fifoDepth), "HDMI CDC FIFO depth must be a power of two")
   require(isPow2(pixelRepeatX), "horizontal pixel repeat must be a power of two")
+  require(isPow2(pixelRepeatY), "vertical pixel repeat must be a power of two")
   require(prefillLevel > 0 && prefillLevel < fifoDepth)
   require(refillLowLevel > 0 && refillLowLevel < refillHighLevel)
   require(refillHighLevel < fifoDepth)
@@ -364,6 +368,7 @@ case class HdmiCdcFramebufferScanout(
   ))
 
   private val repeatShift = log2Up(pixelRepeatX)
+  private val yRepeatShift = log2Up(pixelRepeatY)
   // Keep each cached scanout fill within a 256-byte window.  The downstream
   // BMB/AXI bridge accepts longer lines, but a line that crosses a 4 KiB
   // boundary can wrap response data on the Console DDR path.
@@ -385,17 +390,26 @@ case class HdmiCdcFramebufferScanout(
     (sourceWidth - 1).resized
   )
   val atEndOfPrefetchChunk = prefetchX === prefetchChunkEndX
-  val atEndOfDisplayFrame = atEndOfDisplayLine && prefetchY === (displayHeight - 1).resized
+  val sourceHeight = (displayHeight >> yRepeatShift).resize(vWidth)
+  def fetchX(pixel: UInt): UInt = {
+    val scaled = (pixel << repeatShift).resize(10 bits)
+    if (originX == 0) scaled else (scaled + U(originX, 10 bits)).resize(10 bits)
+  }
+  val fetchY = {
+    val scaled = (prefetchY << yRepeatShift).resize(10 bits)
+    if (originY == 0) scaled else (scaled + U(originY, 10 bits)).resize(10 bits)
+  }
+  val atEndOfDisplayFrame = atEndOfDisplayLine && prefetchY === (sourceHeight - 1).resized
   val lineStartAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
-    (prefetchX << repeatShift).resize(10 bits),
-    prefetchY.resize(10 bits),
+    fetchX(prefetchX),
+    fetchY,
     io.regs.pixelStride
   )
   val lineEndAddress = FramebufferAddressMath.planeAddress(
     prefetchBase,
-    (prefetchChunkEndX << repeatShift).resize(10 bits),
-    prefetchY.resize(10 bits),
+    fetchX(prefetchChunkEndX),
+    fetchY,
     io.regs.pixelStride
   )
 
@@ -433,8 +447,8 @@ case class HdmiCdcFramebufferScanout(
   io.readReq.valid := canPrefetch && linePrefetched
   io.readReq.address := FramebufferAddressMath.planeAddress(
     prefetchBase,
-    (prefetchX << repeatShift).resize(10 bits),
-    prefetchY.resize(10 bits),
+    fetchX(prefetchX),
+    fetchY,
     io.regs.pixelStride
   )
 
@@ -502,17 +516,33 @@ case class HdmiCdcFramebufferScanout(
     // standard timing.
     val repeatGroupLast = if (pixelRepeatX == 1) True else
       scan.io.x(repeatShift - 1 downto 0) === U(pixelRepeatX - 1, repeatShift bits)
-    pixelFifo.io.pop.ready :=
-      useFramebuffer && frameAligned && contentActive && repeatGroupLast
-    when(useFramebuffer && frameAligned && contentActive && !pixelFifo.io.pop.valid) {
+    // Repeat Y fetches every Nth framebuffer line and paints it N times.
+    // The first line of each group comes from the FIFO; the rest replay it.
+    val yGroupFirst = if (pixelRepeatY == 1) True else
+      scan.io.y(yRepeatShift - 1 downto 0) === U(0, yRepeatShift bits)
+    val takePixel = useFramebuffer && frameAligned && contentActive && repeatGroupLast && yGroupFirst
+    pixelFifo.io.pop.ready := takePixel
+    when(takePixel && !pixelFifo.io.pop.valid) {
       underflowReg := True
     }
 
-    val rgb = Rgb888.applyGamma(Rgb888.fromRgb565(pixelFifo.io.pop.payload), gammaLut)
+    val sourcePixel = Bits(16 bits)
+    if (pixelRepeatY == 1) {
+      sourcePixel := pixelFifo.io.pop.payload
+    } else {
+      val lineStore = Mem(Bits(16 bits), 1024)
+      val xIdx = (scan.io.x >> repeatShift).resize(10 bits)
+      when(pixelFifo.io.pop.fire) {
+        lineStore.write(xIdx, pixelFifo.io.pop.payload)
+      }
+      sourcePixel := Mux(yGroupFirst, pixelFifo.io.pop.payload, lineStore.readAsync(xIdx))
+    }
+    val rgb = Rgb888.applyGamma(Rgb888.fromRgb565(sourcePixel), gammaLut)
     io.video.rgb := rgb
+    val missingPixel = yGroupFirst && !pixelFifo.io.pop.valid
     when(testPatternEnable) {
       io.video.rgb := pattern.io.rgb
-    } elsewhen (!frameAligned || !contentActive || !pixelFifo.io.pop.valid) {
+    } elsewhen (!frameAligned || !contentActive || missingPixel) {
       io.video.rgb := Rgb888.black()
     }
     io.video.de := scan.io.active

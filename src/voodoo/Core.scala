@@ -137,7 +137,10 @@ case class Core(c: Config) extends Component {
   val hdmiScanout = HdmiCdcFramebufferScanout(
     c,
     timing = if (c.hdmiScanoutDmt640x480) VideoTiming.dmt640x480 else VideoTiming.cea720x480p,
-    pixelRepeatX = c.hdmiScanoutPixelRepeatX
+    pixelRepeatX = c.hdmiScanoutPixelRepeatX,
+    pixelRepeatY = c.hdmiScanoutPixelRepeatY,
+    originX = c.hdmiScanoutOriginX,
+    originY = c.hdmiScanoutOriginY
   )
 
   io.pipelineBusySources := pixelPipeline.io.debug.pipelineBusySources
@@ -175,8 +178,8 @@ case class Core(c: Config) extends Component {
     hdmiScanout.io.regs.frontBase := framebufferLayout.front
     hdmiScanout.io.regs.backBase := framebufferLayout.back
     hdmiScanout.io.regs.pixelStride := framebufferLayout.draw.pixelStride
-    hdmiScanout.io.regs.displayWidth := 640
-    hdmiScanout.io.regs.displayHeight := 480
+    hdmiScanout.io.regs.displayWidth := c.hdmiScanoutViewWidth
+    hdmiScanout.io.regs.displayHeight := c.hdmiScanoutViewHeight
     hdmiScanout.io.regs.framebufferEnable := Bool(c.enableHdmiScanout)
     hdmiScanout.io.regs.testPatternEnable := False
     hdmiScanout.io.regs.gammaLut := regBank.io.gammaLut

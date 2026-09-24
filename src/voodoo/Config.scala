@@ -34,6 +34,11 @@ case class Config(
     packedTexLayout: Boolean = true,
     enableHdmiScanout: Boolean = true,
     hdmiScanoutPixelRepeatX: Int = 1,
+    hdmiScanoutPixelRepeatY: Int = 1,
+    hdmiScanoutViewWidth: Int = 640,
+    hdmiScanoutViewHeight: Int = 480,
+    hdmiScanoutOriginX: Int = 0,
+    hdmiScanoutOriginY: Int = 0,
     hdmiScanoutDmt640x480: Boolean = false,
     trace: TraceConfig = TraceConfig()
 )
