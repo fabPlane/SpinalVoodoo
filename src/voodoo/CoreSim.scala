@@ -12,7 +12,7 @@ import spinal.lib.bus.bmb._
   *   - Status outputs for fast idle polling
   */
 case class CoreSim(
-    c: Config = Config.voodoo1().copy(enableHdmiScanout = false),
+    c: Config = Config.voodoo1(),
     memTiming: SimMemoryTiming = SimMemoryTiming()
 ) extends Component {
   val io = new Bundle {
